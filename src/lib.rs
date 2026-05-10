@@ -30,10 +30,14 @@ pub mod scan;
 pub mod types;
 pub mod write;
 
-/// Re-export btleplug types commonly needed by downstream crates.
+/// Re-export everything commonly needed by downstream crates.
+///
+/// Downstream SDKs only need: `use bc_ble_core::prelude::*;`
 pub mod prelude {
     pub use crate::adapter::*;
+    pub use crate::c_utils::*;
     pub use crate::callbacks::*;
+    pub use crate::connect::*;
     pub use crate::constants::*;
     pub use crate::runtime::*;
     pub use crate::scan::*;
@@ -41,6 +45,7 @@ pub mod prelude {
     pub use crate::write::*;
 
     pub use btleplug::api::CentralState;
+    pub use btleplug::platform::PeripheralId;
     pub use uuid::Uuid;
 }
 
