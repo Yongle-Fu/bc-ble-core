@@ -1,0 +1,21 @@
+[package]
+name = "bc-ble-core"
+version = "0.1.0"
+edition = "2024"
+description = "Shared BLE core library for BrainCo Rust SDKs"
+license = "MIT"
+repository = "https://github.com/BrainCoTech/bc-ble-core"
+
+[features]
+default = []
+
+[dependencies]
+btleplug = { git = "https://github.com/Yongle-Fu/btleplug", branch = "master" }
+uuid = "1"
+futures = "0.3"
+tokio = { version = "1", features = ["full"] }
+parking_lot = "0.12"
+lazy_static = "1"
+log = "0.4"
+anyhow = "1"
+cfg-if = "1"
