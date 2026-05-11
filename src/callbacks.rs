@@ -57,7 +57,7 @@ pub(crate) fn is_registered_device_discovered() -> bool {
     DEVICE_DISCOVERED_CALLBACK.read().is_some()
 }
 
-pub(crate) fn run_device_discovered_callback(result: ScanResult) {
+pub fn run_device_discovered_callback(result: ScanResult) {
     let cb = DEVICE_DISCOVERED_CALLBACK.read();
     if let Some(callback) = &*cb {
         callback(result);
@@ -78,7 +78,7 @@ pub(crate) fn is_registered_scan_result() -> bool {
     SCAN_RESULT_CALLBACK.read().is_some()
 }
 
-pub(crate) fn run_scan_result_callback(result: ScanResult) {
+pub fn run_scan_result_callback(result: ScanResult) {
     let cb = SCAN_RESULT_CALLBACK.read();
     if let Some(callback) = &*cb {
         callback(result);
@@ -91,7 +91,7 @@ pub fn set_connection_state_callback(callback: ConnectionStateCallback) {
     *CONNECTION_STATE_CALLBACK.write() = Some(callback);
 }
 
-pub(crate) fn run_connection_state_callback(id: &PeripheralId, state: ConnectionState) {
+pub fn run_connection_state_callback(id: &PeripheralId, state: ConnectionState) {
     log::debug!("run_connection_state_callback: {id}, {state:?}");
     let cb = CONNECTION_STATE_CALLBACK.read();
     if let Some(callback) = &*cb {
@@ -105,7 +105,7 @@ pub fn set_received_data_callback(callback: ReceivedDataCallback) {
     *RECEIVED_DATA_CALLBACK.write() = Some(callback);
 }
 
-pub(crate) fn run_received_data_callback(id: &PeripheralId, data: Vec<u8>) {
+pub fn run_received_data_callback(id: &PeripheralId, data: Vec<u8>) {
     let cb = RECEIVED_DATA_CALLBACK.read();
     if let Some(callback) = &*cb {
         callback(id.to_string(), data);
@@ -118,7 +118,7 @@ pub fn set_battery_level_callback(callback: BatteryLevelCallback) {
     *BATTERY_LEVEL_CALLBACK.write() = Some(callback);
 }
 
-pub(crate) fn run_battery_level_callback(id: &PeripheralId, battery_level: u8) {
+pub fn run_battery_level_callback(id: &PeripheralId, battery_level: u8) {
     let cb = BATTERY_LEVEL_CALLBACK.read();
     if let Some(callback) = &*cb {
         callback(id.to_string(), battery_level);
