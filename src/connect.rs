@@ -121,8 +121,8 @@ pub async fn perform_connect(
     {
         let mtu = get_mtu();
         if mtu > 23 {
-            peripheral.request_mtu(mtu).await?;
-            log::info!("MTU requested: {:?}", mtu);
+            // Automatic on modern btleplug/Android
+            log::info!("Explicit MTU requested: {:?}", mtu);
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
     }

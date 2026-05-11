@@ -23,8 +23,11 @@ pub fn to_peripheral_id(id: &str) -> PeripheralId {
             PeripheralId::from_str(&id)
         }
 
-        #[cfg(any(target_os = "windows", target_os = "android"))]
+        #[cfg(target_os = "windows")]
         () => BDAddr::from_str_delim(id).unwrap().into(),
+
+        #[cfg(target_os = "android")]
+        () => unsafe { std::mem::transmute(BDAddr::from_str_delim(id).unwrap()) },
 
         #[cfg(not(any(
             target_os = "macos",
