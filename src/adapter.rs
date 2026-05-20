@@ -3,6 +3,8 @@
 use crate::callbacks::*;
 use crate::runtime::spawn_any;
 use crate::scan::is_scanning;
+#[cfg(target_os = "windows")]
+use crate::scan::{MATCHED_DEVICES, SCAN_FILTER_UUIDS};
 use crate::types::ScanResult;
 use btleplug::api::Peripheral as _;
 use btleplug::api::bleuuid::BleUuid;
