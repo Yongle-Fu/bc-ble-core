@@ -42,13 +42,13 @@ pub async fn find_peripheral(
 ///
 /// The `service_uuids` parameter specifies which service UUIDs to look for
 /// when discovering characteristics (device-specific).
-pub async fn connect_ble_with_services(id: &str, service_uuids: Vec<Uuid>) {
+pub async fn connect_ble_with_services(id: &str, service_uuids: Vec<Uuid>, pair: bool) {
     if let Some(central) = get_central_adapter() {
         let peripheral_id = crate::c_utils::to_peripheral_id(id);
         log::info!("connect_ble, peripheral_id: {peripheral_id:?}");
 
         run_connection_state_callback(&peripheral_id, ConnectionState::Connecting);
-        match perform_connect(&central, &peripheral_id, &service_uuids).await {
+        match perform_connect(&central, &peripheral_id, &service_uuids, pair).await {
             Ok(_) => {
                 log::info!("Successfully connected to peripheral: {id:?}");
                 run_connection_state_callback(&peripheral_id, ConnectionState::Connected);
@@ -79,10 +79,10 @@ pub async fn disconnect_ble(id: &str) {
 }
 
 /// Synchronous connect (offloaded to background task).
-pub fn sync_connect_ble(id: &str, service_uuids: Vec<Uuid>) -> Result<(), anyhow::Error> {
+pub fn sync_connect_ble(id: &str, service_uuids: Vec<Uuid>, pair: bool) -> Result<(), anyhow::Error> {
     let id_clone = id.to_string();
     spawn_any(async move {
-        connect_ble_with_services(&id_clone, service_uuids).await;
+        connect_ble_with_services(&id_clone, service_uuids, pair).await;
     });
     Ok(())
 }
@@ -106,10 +106,22 @@ pub async fn perform_connect(
     central: &Adapter,
     id: &PeripheralId,
     service_uuids: &[Uuid],
+    pair: bool,
 ) -> Result<(), anyhow::Error> {
+    let _ = pair;
     let peripheral = find_peripheral(central, id).await?;
 
     peripheral.connect().await?;
+
+    #[cfg(target_os = "windows")]
+    if pair {
+        log::info!("🔒 Initiating Win32 active BLE pairing (btleplug)...");
+        if let Err(e) = peripheral.pair().await {
+            log::warn!("⚠️ Win32 BLE pairing failed or already paired: {:?}", e);
+        } else {
+            log::info!("✓ Win32 BLE pairing successful");
+        }
+    }
 
     log::info!("Discovering services...");
     peripheral.discover_services().await?;
