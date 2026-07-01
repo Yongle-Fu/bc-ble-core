@@ -11,6 +11,12 @@ use futures::StreamExt;
 use uuid::Uuid;
 
 // MTU storage.
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+lazy_static::lazy_static! {
+  pub(crate) static ref MTU: parking_lot::RwLock<usize> = parking_lot::RwLock::new(247);
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "ios")))]
 lazy_static::lazy_static! {
   pub(crate) static ref MTU: parking_lot::RwLock<usize> = parking_lot::RwLock::new(517);
 }
@@ -143,6 +149,11 @@ pub async fn perform_connect(
     match read_ble_device_info(&peripheral).await {
         Ok(info) => log::info!("BLE Device info: {info:?}"),
         Err(e) => log::warn!("Failed to read BLE device info: {e:?}"),
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    {
+        log::info!("📐 macOS/iOS using default physical CoreBluetooth MTU limit: {} bytes", get_mtu());
     }
 
     let owned_uuids = service_uuids.to_vec();
