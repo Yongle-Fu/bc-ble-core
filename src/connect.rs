@@ -5,7 +5,7 @@ use crate::callbacks::*;
 use crate::constants::BATTERY_LEVEL_CHAR_UUID;
 use crate::runtime::spawn_any;
 use crate::types::*;
-use btleplug::api::{Central, CharPropFlags, Characteristic, Peripheral as _};
+use btleplug::api::{Central, CharPropFlags, Characteristic, GattTransport, Peripheral as _};
 use btleplug::platform::{Adapter, Peripheral, PeripheralId};
 use futures::StreamExt;
 use uuid::Uuid;
@@ -85,7 +85,11 @@ pub async fn disconnect_ble(id: &str) {
 }
 
 /// Synchronous connect (offloaded to background task).
-pub fn sync_connect_ble(id: &str, service_uuids: Vec<Uuid>, pair: bool) -> Result<(), anyhow::Error> {
+pub fn sync_connect_ble(
+    id: &str,
+    service_uuids: Vec<Uuid>,
+    pair: bool,
+) -> Result<(), anyhow::Error> {
     let id_clone = id.to_string();
     spawn_any(async move {
         connect_ble_with_services(&id_clone, service_uuids, pair).await;
@@ -114,10 +118,20 @@ pub async fn perform_connect(
     service_uuids: &[Uuid],
     pair: bool,
 ) -> Result<(), anyhow::Error> {
+    perform_connect_with_transport(central, id, service_uuids, pair, GattTransport::Auto).await
+}
+
+pub async fn perform_connect_with_transport(
+    central: &Adapter,
+    id: &PeripheralId,
+    service_uuids: &[Uuid],
+    pair: bool,
+    transport: GattTransport,
+) -> Result<(), anyhow::Error> {
     let _ = pair;
     let peripheral = find_peripheral(central, id).await?;
 
-    peripheral.connect().await?;
+    peripheral.connect_with_transport(transport).await?;
 
     #[cfg(target_os = "windows")]
     if pair {
@@ -153,7 +167,10 @@ pub async fn perform_connect(
 
     #[cfg(any(target_os = "macos", target_os = "ios"))]
     {
-        log::info!("📐 macOS/iOS using default physical CoreBluetooth MTU limit: {} bytes", get_mtu());
+        log::info!(
+            "📐 macOS/iOS using default physical CoreBluetooth MTU limit: {} bytes",
+            get_mtu()
+        );
     }
 
     let owned_uuids = service_uuids.to_vec();

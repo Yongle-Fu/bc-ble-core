@@ -10,7 +10,7 @@ repository = "https://github.com/BrainCoTech/bc-ble-core"
 default = []
 
 [dependencies]
-btleplug = { git = "https://github.com/Yongle-Fu/btleplug", rev = "835644f0cf7fbc95f6f98b6299367ca90aa233ff" }
+btleplug = { git = "https://github.com/Yongle-Fu/btleplug", rev = "2c1ca3596d2ec4a148554a1a16b2fc89b76f3a55" }
 uuid = "1"
 futures = "0.3"
 tokio = { version = "1", features = ["full"] }
