@@ -4,9 +4,44 @@ use crate::adapter::get_central_adapter;
 use crate::c_utils::to_peripheral_id;
 use crate::connect::{find_peripheral, get_mtu};
 use crate::runtime::spawn_any;
-use btleplug::api::{CharPropFlags, Peripheral as _, WriteType};
+use btleplug::api::{CharPropFlags, Characteristic, Peripheral as _, WriteType};
 use btleplug::platform::{Adapter, PeripheralId};
 use uuid::Uuid;
+
+fn select_write_characteristic<'a>(
+    characteristics: impl Iterator<Item = &'a Characteristic> + Clone,
+    service_uuids: &[Uuid],
+    without_response: bool,
+) -> Option<(&'a Characteristic, WriteType)> {
+    let requested = if without_response {
+        (
+            CharPropFlags::WRITE_WITHOUT_RESPONSE,
+            WriteType::WithoutResponse,
+        )
+    } else {
+        (CharPropFlags::WRITE, WriteType::WithResponse)
+    };
+    let fallback = if without_response {
+        (CharPropFlags::WRITE, WriteType::WithResponse)
+    } else {
+        (
+            CharPropFlags::WRITE_WITHOUT_RESPONSE,
+            WriteType::WithoutResponse,
+        )
+    };
+
+    [requested, fallback]
+        .into_iter()
+        .find_map(|(property, write_type)| {
+            characteristics
+                .clone()
+                .find(|characteristic| {
+                    service_uuids.contains(&characteristic.service_uuid)
+                        && characteristic.properties.contains(property)
+                })
+                .map(|characteristic| (characteristic, write_type))
+        })
+}
 
 /// Write data to a BLE peripheral, splitting into MTU-sized chunks.
 pub async fn perform_write_value(
@@ -23,21 +58,17 @@ pub async fn perform_write_value(
     peripheral.discover_services().await?;
 
     let chars = peripheral.characteristics();
-    let tx_char = chars
-        .iter()
-        .find(|c| {
-            service_uuids.contains(&c.service_uuid)
-                && (!without_response && c.properties.contains(CharPropFlags::WRITE)
-                    || (without_response
-                        && c.properties.contains(CharPropFlags::WRITE_WITHOUT_RESPONSE)))
-        })
-        .ok_or_else(|| anyhow::anyhow!("Write characteristic not found for peripheral: {id:?}"))?;
+    let (tx_char, write_type) =
+        select_write_characteristic(chars.iter(), service_uuids, without_response).ok_or_else(
+            || anyhow::anyhow!("Write characteristic not found for peripheral: {id:?}"),
+        )?;
 
-    let write_type = if without_response {
-        WriteType::WithoutResponse
-    } else {
-        WriteType::WithResponse
-    };
+    if without_response != (write_type == WriteType::WithoutResponse) {
+        log::debug!(
+            "Requested BLE write mode is unavailable; using {write_type:?} for characteristic {}",
+            tx_char.uuid
+        );
+    }
 
     // Split data into MTU-sized chunks
     let mtu = get_mtu() - 3; // 3 bytes for GATT header
@@ -52,6 +83,63 @@ pub async fn perform_write_value(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeSet;
+
+    fn uuid(value: u128) -> Uuid {
+        Uuid::from_u128(value)
+    }
+
+    fn characteristic(service_uuid: Uuid, properties: CharPropFlags) -> Characteristic {
+        Characteristic {
+            uuid: uuid(2),
+            service_uuid,
+            properties,
+            descriptors: BTreeSet::new(),
+        }
+    }
+
+    #[test]
+    fn follows_requested_mode_when_both_are_supported() {
+        let service_uuid = uuid(1);
+        let characteristic = characteristic(
+            service_uuid,
+            CharPropFlags::WRITE | CharPropFlags::WRITE_WITHOUT_RESPONSE,
+        );
+
+        let (_, write_type) =
+            select_write_characteristic(std::iter::once(&characteristic), &[service_uuid], true)
+                .unwrap();
+
+        assert_eq!(write_type, WriteType::WithoutResponse);
+    }
+
+    #[test]
+    fn falls_back_to_the_supported_write_mode() {
+        let service_uuid = uuid(1);
+        let characteristic = characteristic(service_uuid, CharPropFlags::WRITE);
+
+        let (_, write_type) =
+            select_write_characteristic(std::iter::once(&characteristic), &[service_uuid], true)
+                .unwrap();
+
+        assert_eq!(write_type, WriteType::WithResponse);
+    }
+
+    #[test]
+    fn ignores_characteristics_from_other_services() {
+        let service_uuid = uuid(1);
+        let characteristic = characteristic(uuid(3), CharPropFlags::WRITE);
+
+        assert!(
+            select_write_characteristic(std::iter::once(&characteristic), &[service_uuid], false,)
+                .is_none()
+        );
+    }
 }
 
 /// High-level async write helper.
