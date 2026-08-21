@@ -3,7 +3,7 @@
 use crate::adapter::get_central_adapter;
 use crate::callbacks::{clear_device_discovered_callback, clear_scan_result_callback};
 use crate::runtime::block_on_any;
-use btleplug::api::{Central, ScanFilter};
+use btleplug::api::{Central, GattTransport, ScanFilter};
 use parking_lot::RwLock;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -25,6 +25,13 @@ pub(crate) fn set_scanning(scanning: bool) {
 }
 
 pub async fn start_scan_with_uuids(service_uuids: Vec<Uuid>) -> Result<(), anyhow::Error> {
+    start_scan_with_transport(service_uuids, GattTransport::Auto).await
+}
+
+pub async fn start_scan_with_transport(
+    service_uuids: Vec<Uuid>,
+    transport: GattTransport,
+) -> Result<(), anyhow::Error> {
     log::info!("start_scan_with_uuids: {service_uuids:?}");
     if is_scanning() {
         return Err(anyhow::anyhow!("Scan already running."));
@@ -36,16 +43,29 @@ pub async fn start_scan_with_uuids(service_uuids: Vec<Uuid>) -> Result<(), anyho
     {
         *SCAN_FILTER_UUIDS.write() = service_uuids;
         MATCHED_DEVICES.write().clear();
-        let _ = central.start_scan(ScanFilter::default()).await;
+        if let Err(error) = central
+            .start_scan_with_transport(ScanFilter::default(), transport)
+            .await
+        {
+            set_scanning(false);
+            return Err(error.into());
+        }
     }
 
     #[cfg(not(target_os = "windows"))]
     {
-        let _ = central
-            .start_scan(ScanFilter {
-                services: service_uuids,
-            })
-            .await;
+        if let Err(error) = central
+            .start_scan_with_transport(
+                ScanFilter {
+                    services: service_uuids,
+                },
+                transport,
+            )
+            .await
+        {
+            set_scanning(false);
+            return Err(error.into());
+        }
     }
 
     Ok(())
