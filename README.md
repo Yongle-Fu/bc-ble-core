@@ -30,7 +30,7 @@ Add as a git dependency:
 
 ```toml
 [dependencies]
-bc-ble-core = { git = "https://github.com/BrainCoTech/bc-ble-core", branch = "main" }
+bc-ble-core = { git = "https://github.com/Yongle-Fu/bc-ble-core.git", branch = "main" }
 ```
 
 Each SDK provides its own service UUIDs and wires up `received_data_callback`:

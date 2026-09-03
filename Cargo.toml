@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 description = "Shared BLE core library for BrainCo Rust SDKs"
 license = "MIT"
-repository = "https://github.com/BrainCoTech/bc-ble-core"
+repository = "https://github.com/Yongle-Fu/bc-ble-core"
 
 [features]
 default = []
