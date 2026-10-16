@@ -6,7 +6,36 @@ use crate::connect::{find_peripheral, get_mtu};
 use crate::runtime::spawn_any;
 use btleplug::api::{CharPropFlags, Characteristic, Peripheral as _, WriteType};
 use btleplug::platform::{Adapter, PeripheralId};
+use std::{
+    collections::HashMap,
+    future::Future,
+    sync::{Arc, Weak},
+};
 use uuid::Uuid;
+
+lazy_static::lazy_static! {
+  static ref WRITE_GATES: parking_lot::Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>> =
+    parking_lot::Mutex::new(HashMap::new());
+}
+
+async fn serialized_write<T>(id: &str, operation: impl Future<Output = T>) -> T {
+    let gate = {
+        let mut gates = WRITE_GATES.lock();
+        gates.retain(|_, gate| gate.strong_count() > 0);
+        match gates.get(id).and_then(Weak::upgrade) {
+            Some(gate) => gate,
+            None => {
+                let gate = Arc::new(tokio::sync::Mutex::new(()));
+                gates.insert(id.to_owned(), Arc::downgrade(&gate));
+                gate
+            }
+        }
+    };
+    // Hold the gate for the complete protocol frame, not each ATT fragment.
+    // Waiting for a command response happens after this transport call returns.
+    let _guard = gate.lock().await;
+    operation.await
+}
 
 fn select_write_characteristic<'a>(
     characteristics: impl Iterator<Item = &'a Characteristic> + Clone,
@@ -51,6 +80,20 @@ pub async fn perform_write_value(
     without_response: bool,
     service_uuids: &[Uuid],
 ) -> Result<(), anyhow::Error> {
+    serialized_write(
+        &id.to_string(),
+        perform_write_value_serial(central, id, data, without_response, service_uuids),
+    )
+    .await
+}
+
+async fn perform_write_value_serial(
+    central: &Adapter,
+    id: &PeripheralId,
+    data: &[u8],
+    without_response: bool,
+    service_uuids: &[Uuid],
+) -> Result<(), anyhow::Error> {
     log::trace!("Writing value to peripheral: {id:?}, data: {data:?}");
     let peripheral = find_peripheral(central, id).await?;
 
@@ -89,6 +132,71 @@ pub async fn perform_write_value(
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
+
+    #[tokio::test]
+    async fn concurrent_frames_do_not_interleave_and_other_devices_can_write() {
+        let fragments = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (resume_tx, resume_rx) = tokio::sync::oneshot::channel();
+        let first_fragments = fragments.clone();
+        let first = tokio::spawn(async move {
+            serialized_write("fragmented-device", async move {
+                first_fragments.lock().push((1, 0));
+                started_tx.send(()).unwrap();
+                resume_rx.await.unwrap();
+                first_fragments.lock().push((1, 1));
+            })
+            .await;
+        });
+        started_rx.await.unwrap();
+
+        let second_fragments = fragments.clone();
+        let mut second = Box::pin(serialized_write("fragmented-device", async move {
+            second_fragments.lock().push((2, 0));
+            tokio::task::yield_now().await;
+            second_fragments.lock().push((2, 1));
+        }));
+        assert!(futures::poll!(second.as_mut()).is_pending());
+        assert_eq!(*fragments.lock(), vec![(1, 0)]);
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            serialized_write("independent-device", async { 7 }),
+        )
+        .await
+        .expect("A busy device must not block another device");
+        resume_tx.send(()).unwrap();
+        first.await.unwrap();
+        second.await;
+        assert_eq!(*fragments.lock(), vec![(1, 0), (1, 1), (2, 0), (2, 1)]);
+    }
+
+    #[tokio::test]
+    async fn cancelled_writes_release_the_gate() {
+        let mut active = Box::pin(serialized_write(
+            "cancelled-device",
+            std::future::pending::<()>(),
+        ));
+        assert!(futures::poll!(active.as_mut()).is_pending());
+        let mut waiting = Box::pin(serialized_write("cancelled-device", async {}));
+        assert!(futures::poll!(waiting.as_mut()).is_pending());
+        drop(waiting);
+        drop(active);
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            serialized_write("cancelled-device", async { Err::<(), _>("write failed") }),
+        )
+        .await
+        .expect("Cancellation must release the transport gate");
+        assert!(result.is_err());
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            serialized_write("cancelled-device", async {}),
+        )
+        .await
+        .expect("A write error must release the transport gate");
+    }
 
     fn uuid(value: u128) -> Uuid {
         Uuid::from_u128(value)
