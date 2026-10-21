@@ -3,12 +3,102 @@
 use crate::adapter::get_central_adapter;
 use crate::callbacks::*;
 use crate::constants::BATTERY_LEVEL_CHAR_UUID;
-use crate::runtime::spawn_any;
+use crate::notifications::{
+    NotificationStream, NotificationWorker, RECEIVE_QUEUE_CAPACITY, receive_notifications,
+};
+use crate::runtime::{spawn_any, spawn_any_with_handle};
 use crate::types::*;
 use btleplug::api::{Central, CharPropFlags, Characteristic, GattTransport, Peripheral as _};
 use btleplug::platform::{Adapter, Peripheral, PeripheralId};
-use futures::StreamExt;
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
+
 use uuid::Uuid;
+
+#[derive(Default)]
+struct ConnectionSession {
+    peripheral: Option<Peripheral>,
+    notifications: Option<tokio::task::JoinHandle<()>>,
+    notification_worker: Option<NotificationWorker>,
+}
+
+impl ConnectionSession {
+    async fn replace_notifications(
+        &mut self,
+        id: PeripheralId,
+        rx: HashSet<(Uuid, Uuid)>,
+        values: NotificationStream,
+        disconnect_on_failure: Option<Peripheral>,
+    ) {
+        self.stop_notifications().await;
+        let callback_id = id.clone();
+        let worker =
+            NotificationWorker::start(id.to_string(), RECEIVE_QUEUE_CAPACITY, move |value| {
+                deliver_notification(&callback_id, &rx, value);
+            });
+        let sender = worker.sender.clone();
+        let cancelled = worker.cancelled.clone();
+        self.notification_worker = Some(worker);
+        self.notifications = Some(spawn_any_with_handle(async move {
+            if let Err(reason) = receive_notifications(values, &sender, &cancelled).await {
+                log::error!(
+                    "Notification intake failed: device={id} reason={reason}; disconnecting"
+                );
+                if let Some(peripheral) = disconnect_on_failure {
+                    if let Err(error) = peripheral.disconnect().await {
+                        log::error!(
+                            "Failed to disconnect after notification intake failure: {error}"
+                        );
+                    }
+                }
+            }
+        }));
+    }
+    async fn stop_notifications(&mut self) {
+        if let Some(task) = self.notifications.take() {
+            task.abort();
+            let _ = task.await;
+        }
+        if let Some(worker) = self.notification_worker.take() {
+            worker.stop().await;
+        }
+        self.peripheral = None;
+    }
+}
+
+lazy_static::lazy_static! {
+    static ref CONNECTIONS: parking_lot::Mutex<HashMap<PeripheralId, Arc<tokio::sync::Mutex<ConnectionSession>>>> =
+        parking_lot::Mutex::new(HashMap::new());
+}
+
+fn connection_session(id: &PeripheralId) -> Arc<tokio::sync::Mutex<ConnectionSession>> {
+    CONNECTIONS.lock().entry(id.clone()).or_default().clone()
+}
+
+/// Reuse the service handles discovered for the current connection.
+pub(crate) async fn connected_peripheral(id: &PeripheralId) -> Option<Peripheral> {
+    connection_session(id).lock().await.peripheral.clone()
+}
+
+/// Ignore a delayed disconnect event if a replacement connection is already live.
+pub(crate) async fn handle_disconnected(central: &Adapter, id: &PeripheralId) {
+    let slot = connection_session(id);
+    let mut session = slot.lock().await;
+    let peripheral = match session.peripheral.clone() {
+        Some(peripheral) => Some(peripheral),
+        None => find_peripheral(central, id).await.ok(),
+    };
+    if let Some(peripheral) = peripheral {
+        if peripheral.is_connected().await.unwrap_or(false) {
+            return;
+        }
+    }
+    session.stop_notifications().await;
+    drop(session);
+    run_connection_state_callback(id, ConnectionState::Disconnected);
+}
 
 // MTU storage.
 #[cfg(any(target_os = "macos", target_os = "ios"))]
@@ -107,8 +197,19 @@ pub fn sync_disconnect_ble(id: &str) -> Result<(), anyhow::Error> {
 }
 
 pub async fn perform_disconnect(central: &Adapter, id: &PeripheralId) -> Result<(), anyhow::Error> {
-    let peripheral = find_peripheral(central, id).await?;
-    peripheral.disconnect().await?;
+    let slot = connection_session(id);
+    let mut session = slot.lock().await;
+    let peripheral = match session.peripheral.clone() {
+        Some(peripheral) => peripheral,
+        None => find_peripheral(central, id).await?,
+    };
+    if let Err(error) = peripheral.disconnect().await {
+        // A link lost before the explicit disconnect still needs local cleanup.
+        if peripheral.is_connected().await.unwrap_or(false) {
+            return Err(error.into());
+        }
+    }
+    session.stop_notifications().await;
     Ok(())
 }
 
@@ -129,6 +230,19 @@ pub async fn perform_connect_with_transport(
     transport: GattTransport,
 ) -> Result<(), anyhow::Error> {
     let _ = pair;
+    let slot = connection_session(id);
+    let mut session = slot.lock().await;
+    if let Some(peripheral) = &session.peripheral {
+        if session
+            .notifications
+            .as_ref()
+            .is_some_and(|task| !task.is_finished())
+            && peripheral.is_connected().await.unwrap_or(false)
+        {
+            return Ok(());
+        }
+    }
+    session.stop_notifications().await;
     let peripheral = find_peripheral(central, id).await?;
 
     peripheral.connect_with_transport(transport).await?;
@@ -144,9 +258,35 @@ pub async fn perform_connect_with_transport(
     }
 
     log::info!("Discovering services...");
-    peripheral.discover_services().await?;
-
-    setup_data_stream(&peripheral, service_uuids).await?;
+    let prepared = async {
+        peripheral.discover_services().await?;
+        // Start consuming before subscriptions and ancillary reads can produce a
+        // burst into the backend's small notification buffer.
+        let values = peripheral.notifications().await?;
+        let rx = peripheral
+            .characteristics()
+            .iter()
+            .filter(|c| {
+                service_uuids.contains(&c.service_uuid)
+                    && c.properties.contains(CharPropFlags::NOTIFY)
+            })
+            .map(|c| (c.service_uuid, c.uuid))
+            .collect();
+        session
+            .replace_notifications(peripheral.id(), rx, values, Some(peripheral.clone()))
+            .await;
+        setup_data_stream(&peripheral, service_uuids).await?;
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+    match prepared {
+        Ok(()) => {}
+        Err(error) => {
+            let _ = peripheral.disconnect().await;
+            session.stop_notifications().await;
+            return Err(error);
+        }
+    };
 
     // Request MTU on Android
     #[cfg(target_os = "android")]
@@ -168,17 +308,21 @@ pub async fn perform_connect_with_transport(
     #[cfg(any(target_os = "macos", target_os = "ios"))]
     {
         log::info!(
-            "📐 macOS/iOS using default physical CoreBluetooth MTU limit: {} bytes",
+            "macOS/iOS configured write fragmentation MTU: {} bytes (not a negotiated MTU measurement)",
             get_mtu()
         );
     }
 
-    let owned_uuids = service_uuids.to_vec();
-    spawn_any(async move {
-        if let Err(e) = process_notifications_stream(&peripheral, &owned_uuids).await {
-            log::error!("Failed to process notifications: {e:?}");
-        }
-    });
+    if session
+        .notification_worker
+        .as_ref()
+        .is_some_and(|worker| worker.cancelled.load(std::sync::atomic::Ordering::Acquire))
+    {
+        let _ = peripheral.disconnect().await;
+        session.stop_notifications().await;
+        anyhow::bail!("Notification intake failed during connection setup");
+    }
+    session.peripheral = Some(peripheral);
 
     Ok(())
 }
@@ -208,7 +352,9 @@ pub async fn read_ble_device_info(peripheral: &Peripheral) -> Result<BLEDeviceIn
 async fn read_battery_level(peripheral: &Peripheral, battery_char: &Characteristic) {
     match peripheral.read(battery_char).await {
         Ok(value) => {
-            let battery_level = value[0];
+            let Some(&battery_level) = value.first() else {
+                return;
+            };
             log::info!("Read battery level: {battery_level:?}");
             if battery_level <= 100 {
                 run_battery_level_callback(&peripheral.id(), battery_level);
@@ -218,33 +364,26 @@ async fn read_battery_level(peripheral: &Peripheral, battery_char: &Characterist
     }
 }
 
-async fn process_notifications_stream(
-    peripheral: &Peripheral,
-    rx_service_uuids: &[Uuid],
-) -> Result<(), anyhow::Error> {
-    let mut values = peripheral.notifications().await?;
-    let id = peripheral.id();
+fn deliver_notification(
+    id: &PeripheralId,
+    rx_characteristics: &HashSet<(Uuid, Uuid)>,
+    value: btleplug::api::ValueNotification,
+) {
+    log::trace!("Received uuid: {:?}, value: {:?}", value.uuid, value.value);
+    let data = value.value;
 
-    while let Some(value) = values.next().await {
-        log::trace!("Received uuid: {:?}, value: {:?}", value.uuid, value.value);
-        let data = value.value;
+    // Check if notification comes from one of the device's RX characteristics
+    let is_rx = rx_characteristics.contains(&(value.service_uuid, value.uuid));
 
-        // Check if notification comes from one of the device's RX characteristics
-        let is_rx = peripheral.characteristics().iter().any(|c| {
-            c.uuid == value.uuid
-                && rx_service_uuids.contains(&c.service_uuid)
-                && c.properties.contains(CharPropFlags::NOTIFY)
-        });
-
-        if is_rx {
-            run_received_data_callback(&id, data);
-        } else if value.uuid == BATTERY_LEVEL_CHAR_UUID {
-            let battery_level = data[0];
-            log::debug!("battery level: {battery_level:?}");
-            run_battery_level_callback(&id, battery_level);
-        }
+    if is_rx {
+        run_received_data_callback(id, data);
+    } else if value.uuid == BATTERY_LEVEL_CHAR_UUID {
+        let Some(&battery_level) = data.first() else {
+            return;
+        };
+        log::debug!("battery level: {battery_level:?}");
+        run_battery_level_callback(id, battery_level);
     }
-    Ok(())
 }
 
 async fn setup_data_stream(p: &Peripheral, service_uuids: &[Uuid]) -> Result<(), anyhow::Error> {
@@ -269,4 +408,116 @@ async fn setup_data_stream(p: &Peripheral, service_uuids: &[Uuid]) -> Result<(),
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+    use btleplug::api::ValueNotification;
+    use std::time::Duration;
+
+    pub(crate) fn device_id() -> PeripheralId {
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
+        let id = "00000000-0000-0000-0000-000000000001";
+        #[cfg(target_os = "linux")]
+        let id = "hci0/dev_12_34_56_55_55_6D";
+        #[cfg(any(target_os = "windows", target_os = "android"))]
+        let id = "12:34:56:55:55:6D";
+        crate::c_utils::to_peripheral_id(id)
+    }
+
+    fn notifications(
+        receiver: tokio::sync::broadcast::Receiver<ValueNotification>,
+    ) -> NotificationStream {
+        Box::pin(futures::stream::unfold(
+            receiver,
+            |mut receiver| async move { receiver.recv().await.ok().map(|value| (value, receiver)) },
+        ))
+    }
+
+    #[tokio::test]
+    async fn reconnect_delivers_emg_and_imu_once_and_drops_old_receivers() {
+        let (received, mut delivered) = tokio::sync::mpsc::unbounded_channel();
+        set_received_data_callback(Box::new(move |id, data| {
+            received.send((id, data)).unwrap();
+        }));
+        let id = device_id();
+        let emg = Uuid::from_u128(1);
+        let imu = Uuid::from_u128(2);
+        let (source, _) = tokio::sync::broadcast::channel(16);
+        let mut session = ConnectionSession::default();
+
+        for cycle in 0..3 {
+            // Replies arriving before the processing task is scheduled must be retained.
+            let stream = notifications(source.subscribe());
+            for uuid in [emg, imu] {
+                source
+                    .send(ValueNotification {
+                        uuid,
+                        service_uuid: Uuid::from_u128(7),
+                        value: vec![cycle, uuid.as_u128() as u8],
+                    })
+                    .unwrap();
+            }
+            session
+                .replace_notifications(
+                    id.clone(),
+                    HashSet::from([(Uuid::from_u128(7), emg), (Uuid::from_u128(7), imu)]),
+                    stream,
+                    None,
+                )
+                .await;
+            for expected in [vec![cycle, 1], vec![cycle, 2]] {
+                let frame = tokio::time::timeout(Duration::from_secs(1), delivered.recv())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(frame, (id.to_string(), expected));
+            }
+            assert_eq!(source.receiver_count(), 1);
+            assert!(
+                tokio::time::timeout(Duration::from_millis(10), delivered.recv())
+                    .await
+                    .is_err()
+            );
+            session.stop_notifications().await;
+            assert_eq!(source.receiver_count(), 0);
+            assert!(
+                source
+                    .send(ValueNotification {
+                        uuid: emg,
+                        service_uuid: Uuid::from_u128(7),
+                        value: vec![99]
+                    })
+                    .is_err()
+            );
+        }
+
+        // Replacing an active listener also waits for its receiver to disappear.
+        for _ in 0..3 {
+            session
+                .replace_notifications(
+                    id.clone(),
+                    HashSet::from([(Uuid::from_u128(7), emg)]),
+                    notifications(source.subscribe()),
+                    None,
+                )
+                .await;
+            assert_eq!(source.receiver_count(), 1);
+        }
+        session.stop_notifications().await;
+        assert_eq!(source.receiver_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn lifecycle_operations_share_the_same_device_lock() {
+        let id = device_id();
+        let first = connection_session(&id);
+        let second = connection_session(&id);
+        assert!(Arc::ptr_eq(&first, &second));
+        let held = first.lock().await;
+        assert!(second.try_lock().is_err());
+        drop(held);
+        assert!(second.try_lock().is_ok());
+    }
 }

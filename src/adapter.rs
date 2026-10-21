@@ -129,7 +129,7 @@ pub async fn initialize_central_event_listener(
             }
             CentralEvent::DeviceDisconnected(id) => {
                 log::info!("DeviceDisconnected: {id:?}");
-                run_connection_state_callback(&id, crate::types::ConnectionState::Disconnected);
+                crate::connect::handle_disconnected(&central, &id).await;
             }
             CentralEvent::ManufacturerDataAdvertisement {
                 id,

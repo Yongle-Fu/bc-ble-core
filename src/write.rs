@@ -2,7 +2,7 @@
 
 use crate::adapter::get_central_adapter;
 use crate::c_utils::to_peripheral_id;
-use crate::connect::{find_peripheral, get_mtu};
+use crate::connect::{connected_peripheral, find_peripheral, get_mtu};
 use crate::runtime::spawn_any;
 use btleplug::api::{CharPropFlags, Characteristic, Peripheral as _, WriteType};
 use btleplug::platform::{Adapter, PeripheralId};
@@ -95,10 +95,14 @@ async fn perform_write_value_serial(
     service_uuids: &[Uuid],
 ) -> Result<(), anyhow::Error> {
     log::trace!("Writing value to peripheral: {id:?}, data: {data:?}");
-    let peripheral = find_peripheral(central, id).await?;
-
-    #[cfg(target_os = "linux")]
-    peripheral.discover_services().await?;
+    let peripheral = match connected_peripheral(id).await {
+        Some(peripheral) => peripheral,
+        None => {
+            let peripheral = find_peripheral(central, id).await?;
+            peripheral.discover_services().await?;
+            peripheral
+        }
+    };
 
     let chars = peripheral.characteristics();
     let (tx_char, write_type) =
