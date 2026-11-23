@@ -114,10 +114,16 @@ pub fn sync_start_scan_with_uuids(service_uuids: Vec<Uuid>) -> Result<(), anyhow
     block_on_any(async { start_scan_with_uuids(service_uuids).await })
 }
 
+/// Stop scanning and unregister the scan callbacks.
 pub async fn stop_scan() -> Result<(), anyhow::Error> {
-    log::info!("stop_scan");
     clear_scan_result_callback();
     clear_device_discovered_callback();
+    stop_scan_preserving_callbacks().await
+}
+
+/// Stop scanning while keeping the registered callbacks for subsequent scans.
+pub async fn stop_scan_preserving_callbacks() -> Result<(), anyhow::Error> {
+    log::info!("stop_scan");
     if !is_scanning() {
         return Ok(());
     }
@@ -148,12 +154,14 @@ mod tests {
                 set_scanning(false);
                 SCAN_FILTER_UUIDS.write().clear();
                 MATCHED_DEVICES.write().clear();
+                clear_scan_result_callback();
                 clear_device_discovered_callback();
             }
         }
         let _cleanup = Cleanup;
         let results = Arc::new(parking_lot::Mutex::new(Vec::new()));
         let captured = results.clone();
+        set_scan_result_callback(Box::new(|_| {}));
         set_device_discovered_callback(Box::new(move |result| captured.lock().push(result)));
         let service = Uuid::from_u128(7);
         let id = crate::test_support::device_id();
@@ -188,11 +196,9 @@ mod tests {
         set_scanning(false);
         deliver_discovered(&id.to_string(), properties(), None);
         assert_eq!(results.lock().len(), 4);
-        sync_stop_scan().unwrap();
-        assert!(!is_registered_device_discovered());
-
-        let captured = results.clone();
-        set_device_discovered_callback(Box::new(move |result| captured.lock().push(result)));
+        block_on_any(stop_scan_preserving_callbacks()).unwrap();
+        assert!(is_registered_scan_result());
+        assert!(is_registered_device_discovered());
         begin_scan(vec![Uuid::from_u128(8)]);
         deliver_discovered(&id.to_string(), properties(), None);
         assert_eq!(results.lock().len(), 4);
@@ -201,6 +207,10 @@ mod tests {
         deliver_discovered(&id.to_string(), properties(), None);
         assert_eq!(results.lock().len(), 5);
         assert!(MATCHED_DEVICES.read().is_empty());
+        set_scanning(false);
+        sync_stop_scan().unwrap();
+        assert!(!is_registered_scan_result());
+        assert!(!is_registered_device_discovered());
 
         for event in [
             CentralEvent::DeviceDiscovered(id.clone()),
