@@ -121,8 +121,9 @@ pub async fn stop_scan() -> Result<(), anyhow::Error> {
     if !is_scanning() {
         return Ok(());
     }
-    let central = get_central_adapter().unwrap();
-    let _ = central.stop_scan().await;
+    let central =
+        get_central_adapter().ok_or_else(|| anyhow::anyhow!("No central adapter available"))?;
+    central.stop_scan().await?;
     set_scanning(false);
     Ok(())
 }
@@ -196,9 +197,10 @@ mod tests {
         deliver_discovered(&id.to_string(), properties(), None);
         assert_eq!(results.lock().len(), 4);
         set_scanning(false);
-        begin_scan(vec![service]);
+        begin_scan(vec![]);
         deliver_discovered(&id.to_string(), properties(), None);
         assert_eq!(results.lock().len(), 5);
+        assert!(MATCHED_DEVICES.read().is_empty());
 
         for event in [
             CentralEvent::DeviceDiscovered(id.clone()),
