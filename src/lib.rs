@@ -52,3 +52,18 @@ pub mod prelude {
 /// Re-export btleplug for downstream crates that need direct access.
 pub use btleplug;
 pub use uuid;
+
+#[cfg(test)]
+mod test_support {
+    pub(crate) static SCAN_CALLBACK_TEST_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
+    pub(crate) fn device_id() -> btleplug::platform::PeripheralId {
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
+        let id = "00000000-0000-0000-0000-000000000001";
+        #[cfg(target_os = "linux")]
+        let id = "hci0/dev_12_34_56_55_55_6D";
+        #[cfg(any(target_os = "windows", target_os = "android"))]
+        let id = "12:34:56:55:55:6D";
+        crate::c_utils::to_peripheral_id(id)
+    }
+}

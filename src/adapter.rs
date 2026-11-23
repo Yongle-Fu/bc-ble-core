@@ -3,8 +3,6 @@
 use crate::callbacks::*;
 use crate::runtime::spawn_any;
 use crate::scan::is_scanning;
-#[cfg(target_os = "windows")]
-use crate::scan::{MATCHED_DEVICES, SCAN_FILTER_UUIDS};
 use crate::types::ScanResult;
 use btleplug::api::Peripheral as _;
 use btleplug::api::bleuuid::BleUuid;
@@ -63,7 +61,7 @@ pub async fn initialize_central_adapter() -> Result<(), Box<dyn std::error::Erro
 
 /// Central event listener loop.
 ///
-/// Handles: StateUpdate, DeviceDiscovered/Updated (with Windows UUID filter),
+/// Handles: StateUpdate, device discovery and advertisement updates,
 /// DeviceConnected, DeviceDisconnected, ManufacturerDataAdvertisement, etc.
 pub async fn initialize_central_event_listener(
     central: Adapter,
@@ -73,56 +71,13 @@ pub async fn initialize_central_event_listener(
     log::info!("central.events listener started.");
 
     while let Some(event) = events.next().await {
+        if let Some((id, rssi)) = discovery_update(&event) {
+            deliver_device_update(&central, id, rssi).await;
+        }
         match event {
             CentralEvent::StateUpdate(state) => {
                 log::info!("Central StateUpdate: {state:?}");
                 run_adapter_state_callback(state);
-            }
-            CentralEvent::DeviceDiscovered(id) | CentralEvent::DeviceUpdated(id) => {
-                log::trace!("DeviceDiscovered or DeviceUpdated: {id:?}");
-                if !is_registered_device_discovered() || !is_scanning() {
-                    continue;
-                }
-                if let Ok(peripheral) = central.peripheral(&id).await
-                    && let Ok(properties) = peripheral.properties().await
-                {
-                    let properties = properties.unwrap();
-
-                    #[cfg(target_os = "windows")]
-                    {
-                        let filter_uuids = SCAN_FILTER_UUIDS.read().clone();
-                        if !filter_uuids.is_empty() {
-                            let device_addr = id.to_string();
-                            let has_uuid =
-                                filter_uuids.iter().any(|u| properties.services.contains(u));
-                            let mut matched = MATCHED_DEVICES.write();
-                            if has_uuid {
-                                matched.insert(device_addr);
-                            } else if !matched.contains(&device_addr) {
-                                continue;
-                            }
-                        }
-                    }
-
-                    let device_address = id.to_string();
-                    let device_name = properties.local_name.unwrap_or("N/A".to_string());
-                    let rssi = properties.rssi.unwrap_or(0);
-
-                    let service_uuids: Vec<String> = properties
-                        .services
-                        .iter()
-                        .map(|uuid| uuid.to_string())
-                        .collect();
-
-                    let scan_result = ScanResult {
-                        id: device_address,
-                        name: device_name,
-                        rssi,
-                        service_uuids,
-                    };
-
-                    run_device_discovered_callback(scan_result);
-                }
             }
             CentralEvent::DeviceConnected(id) => {
                 log::info!("DeviceConnected: {id:?}");
@@ -149,7 +104,6 @@ pub async fn initialize_central_event_listener(
                     services.into_iter().map(|s| s.to_short_string()).collect();
                 log::trace!("ServicesAdvertisement: {id:?}, {services:?}");
             }
-            // Catch-all for newer CentralEvent variants (e.g. DeviceServicesModified, RssiUpdate)
             #[allow(unreachable_patterns)]
             _ => {}
         }
@@ -157,6 +111,35 @@ pub async fn initialize_central_event_listener(
 
     log::info!("central.events stopped.");
     Ok(())
+}
+
+pub(crate) fn discovery_update(
+    event: &CentralEvent,
+) -> Option<(&btleplug::platform::PeripheralId, Option<i16>)> {
+    match event {
+        CentralEvent::DeviceDiscovered(id)
+        | CentralEvent::DeviceUpdated(id)
+        | CentralEvent::ServicesAdvertisement { id, .. }
+        | CentralEvent::ServiceDataAdvertisement { id, .. }
+        | CentralEvent::ManufacturerDataAdvertisement { id, .. } => Some((id, None)),
+        CentralEvent::RssiUpdate { id, rssi } => Some((id, Some(*rssi))),
+        _ => None,
+    }
+}
+
+async fn deliver_device_update(
+    central: &Adapter,
+    id: &btleplug::platform::PeripheralId,
+    rssi: Option<i16>,
+) {
+    if !is_scanning() || !is_registered_device_discovered() {
+        return;
+    }
+    if let Ok(peripheral) = central.peripheral(id).await
+        && let Ok(Some(properties)) = peripheral.properties().await
+    {
+        crate::scan::deliver_discovered(&id.to_string(), properties, rssi);
+    }
 }
 
 async fn handle_manufacturer_data(
