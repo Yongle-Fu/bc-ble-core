@@ -13,8 +13,11 @@ pub fn get_runtime() -> Arc<Runtime> {
 
 /// Synchronously block on an async Future (auto-adapts to inside/outside tokio runtime).
 pub fn block_on_any<F: Future>(fut: F) -> F::Output {
-    if Handle::try_current().is_ok() {
-        return tokio::task::block_in_place(|| Handle::current().block_on(fut));
+    if let Ok(handle) = Handle::try_current() {
+        if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread {
+            return tokio::task::block_in_place(|| handle.block_on(fut));
+        }
+        panic!("block_on_any cannot block inside a current_thread tokio runtime");
     }
     let rt = get_runtime();
     rt.block_on(fut)
@@ -31,6 +34,15 @@ where
         let rt = get_runtime();
         rt.spawn(fut);
     }
+}
+
+/// Spawn an async Future on the process-global runtime and return a JoinHandle.
+pub fn spawn_global_with_handle<F>(fut: F) -> tokio::task::JoinHandle<F::Output>
+where
+    F: Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    get_runtime().spawn(fut)
 }
 
 /// Spawn an async Future and return a JoinHandle for awaiting the result.

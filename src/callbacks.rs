@@ -14,6 +14,7 @@ use std::sync::Arc;
 pub type AdapterStateCallback = Box<dyn Fn(CentralState) + Send + Sync>;
 pub type ScanResultCallback = Box<dyn Fn(ScanResult) + Send + Sync>;
 pub type ConnectionStateCallback = Box<dyn Fn(String, ConnectionState) + Send + Sync>;
+type ConnectionStateObserver = Arc<dyn Fn(String, ConnectionState) + Send + Sync>;
 pub type BatteryLevelCallback = Box<dyn Fn(String, u8) + Send + Sync>;
 pub type ReceivedDataCallback = Box<dyn Fn(String, Vec<u8>) + Send + Sync>;
 
@@ -53,6 +54,8 @@ static CONNECTION_STATE_CALLBACK: CallbackSlot<dyn Fn(String, ConnectionState) +
 static RECEIVED_DATA_CALLBACK: CallbackSlot<dyn Fn(String, Vec<u8>) + Send + Sync> =
     CallbackSlot::new();
 static BATTERY_LEVEL_CALLBACK: CallbackSlot<dyn Fn(String, u8) + Send + Sync> = CallbackSlot::new();
+
+static CONNECTION_STATE_OBSERVERS: RwLock<Vec<ConnectionStateObserver>> = RwLock::new(Vec::new());
 
 // ==================== Adapter state ====================
 
@@ -115,8 +118,17 @@ pub fn set_connection_state_callback(callback: ConnectionStateCallback) {
     CONNECTION_STATE_CALLBACK.set(Some(callback));
 }
 
+/// Add an SDK lifecycle observer without replacing the application's callback.
+pub fn add_connection_state_observer(callback: ConnectionStateCallback) {
+    CONNECTION_STATE_OBSERVERS.write().push(Arc::from(callback));
+}
+
 pub fn run_connection_state_callback(id: &PeripheralId, state: ConnectionState) {
     log::debug!("run_connection_state_callback: {id}, {state:?}");
+    let observers = CONNECTION_STATE_OBSERVERS.read().clone();
+    for observer in observers {
+        observer(id.to_string(), state);
+    }
     if let Some(callback) = CONNECTION_STATE_CALLBACK.snapshot() {
         callback(id.to_string(), state);
     }

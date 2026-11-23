@@ -25,6 +25,7 @@ pub mod c_utils;
 pub mod callbacks;
 pub mod connect;
 pub mod constants;
+mod notifications;
 pub mod runtime;
 pub mod scan;
 pub mod types;

@@ -22,17 +22,12 @@ pub struct ScanResult {
 
 /// BLE adapter state (mapped from btleplug CentralState).
 #[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CentralAdapterState {
+    #[default]
     Unknown = 0,
     PoweredOn = 1,
     PoweredOff = 2,
-}
-
-impl Default for CentralAdapterState {
-    fn default() -> Self {
-        Self::Unknown
-    }
 }
 
 impl From<u8> for CentralAdapterState {
@@ -47,18 +42,13 @@ impl From<u8> for CentralAdapterState {
 
 /// BLE connection state.
 #[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ConnectionState {
     Connecting = 0,
     Connected = 1,
     Disconnecting = 2,
+    #[default]
     Disconnected = 3,
-}
-
-impl Default for ConnectionState {
-    fn default() -> Self {
-        Self::Disconnected
-    }
 }
 
 impl From<u8> for ConnectionState {

@@ -5,7 +5,6 @@ use crate::runtime::spawn_any;
 use crate::scan::is_scanning;
 use crate::types::ScanResult;
 use btleplug::api::Peripheral as _;
-use btleplug::api::bleuuid::BleUuid;
 use btleplug::api::{Central, CentralEvent, Manager as _};
 use btleplug::platform::Adapter;
 use futures::StreamExt;
@@ -14,6 +13,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 lazy_static::lazy_static! {
+  static ref INITIALIZE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::new(());
   pub static ref GLOBAL_CENTRAL: Arc<RwLock<Option<Adapter>>> = Arc::new(RwLock::new(None));
 }
 
@@ -27,6 +27,10 @@ pub fn get_central_adapter() -> Option<Adapter> {
 /// After initialization, call `set_received_data_callback` to wire up
 /// your device's data parser. This must be done by the downstream SDK.
 pub async fn initialize_central_adapter() -> Result<(), Box<dyn std::error::Error>> {
+    let _initializing = INITIALIZE_LOCK.lock().await;
+    if get_central_adapter().is_some() {
+        return Ok(());
+    }
     log::debug!("Initializing central adapter...");
     let manager = btleplug::platform::Manager::new().await?;
     log::debug!("Bluetooth manager: {manager:?}");
@@ -45,13 +49,13 @@ pub async fn initialize_central_adapter() -> Result<(), Box<dyn std::error::Erro
         log::debug!("Other adapter: {:?}", adapter.adapter_info().await?);
     }
 
-    let mut global_central = GLOBAL_CENTRAL.write();
-    *global_central = Some(central.clone());
+    let events = central.events().await?;
+    *GLOBAL_CENTRAL.write() = Some(central.clone());
     log::info!("Central adapter initialized.");
 
     spawn_any(async move {
         log::info!("Starting central event listener...");
-        if let Err(e) = initialize_central_event_listener(central).await {
+        if let Err(e) = listen_for_events(central, events).await {
             log::warn!("Failed to initialize event listener: {e:?}");
         }
     });
@@ -61,13 +65,20 @@ pub async fn initialize_central_adapter() -> Result<(), Box<dyn std::error::Erro
 
 /// Central event listener loop.
 ///
-/// Handles: StateUpdate, device discovery and advertisement updates,
+/// Handles: StateUpdate, DeviceDiscovered/Updated (with Windows UUID filter),
 /// DeviceConnected, DeviceDisconnected, ManufacturerDataAdvertisement, etc.
 pub async fn initialize_central_event_listener(
     central: Adapter,
 ) -> Result<(), Box<dyn std::error::Error>> {
     log::info!("Initializing central event listener...");
-    let mut events = central.events().await?;
+    let events = central.events().await?;
+    listen_for_events(central, events).await
+}
+
+async fn listen_for_events(
+    central: Adapter,
+    mut events: std::pin::Pin<Box<dyn futures::Stream<Item = CentralEvent> + Send>>,
+) -> Result<(), Box<dyn std::error::Error>> {
     log::info!("central.events listener started.");
 
     while let Some(event) = events.next().await {
@@ -84,7 +95,10 @@ pub async fn initialize_central_event_listener(
             }
             CentralEvent::DeviceDisconnected(id) => {
                 log::info!("DeviceDisconnected: {id:?}");
-                run_connection_state_callback(&id, crate::types::ConnectionState::Disconnected);
+                let central = central.clone();
+                crate::runtime::spawn_any(async move {
+                    crate::connect::handle_disconnected(&central, &id).await;
+                });
             }
             CentralEvent::ManufacturerDataAdvertisement {
                 id,
@@ -95,14 +109,6 @@ pub async fn initialize_central_event_listener(
                     continue;
                 }
                 let _ = handle_manufacturer_data(&central, &id, manufacturer_data).await;
-            }
-            CentralEvent::ServiceDataAdvertisement { id, service_data } => {
-                log::trace!("ServiceDataAdvertisement: {id:?}, {service_data:?}");
-            }
-            CentralEvent::ServicesAdvertisement { id, services } => {
-                let services: Vec<String> =
-                    services.into_iter().map(|s| s.to_short_string()).collect();
-                log::trace!("ServicesAdvertisement: {id:?}, {services:?}");
             }
             #[allow(unreachable_patterns)]
             _ => {}
