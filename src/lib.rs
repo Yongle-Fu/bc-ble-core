@@ -2,10 +2,8 @@
 //!
 //! Shared BLE core library for BrainCo Rust SDKs.
 //!
-//! This crate provides the common BLE transport layer used by:
-//! - `bc-band-sdk` (Myon EEG headband)
-//! - `honda-sdk` (Honda EEG headband)
-//! - `morpheus-sdk` (Morpheus/Melody sleep devices)
+//! The crate provides adapter, scan, connection, notification, and write
+//! handling for the Rust BLE paths of SDKs such as NexLoop, Honda, and Morpheus.
 //!
 //! ## Architecture
 //!
@@ -16,7 +14,8 @@
 //! - **adapter** — central adapter initialization and event listening
 //! - **scan** — scan start/stop with Windows UUID filter
 //! - **connect** — connect/disconnect, MTU, service discovery, notifications
-//! - **write** — BLE write with MTU chunking
+//! - **notifications** — notification intake and ordered callback delivery
+//! - **write** — per-device frame serialization and MTU-sized writes
 //! - **c_utils** — C FFI utilities (PeripheralId conversion, UUID parsing)
 //! - **constants** — standard BLE UUIDs (battery, device info)
 

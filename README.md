@@ -4,10 +4,16 @@ Shared BLE core library for BrainCo Rust SDKs.
 
 ## Overview
 
-This crate extracts the common BLE transport layer from:
-- [`bc-band-sdk`](https://github.com/BrainCoTech/bc-band-sdk) — Myon EEG headband
-- [`honda-sdk`](https://github.com/BrainCoTech/honda-sdk) — Honda EEG headband
-- [`morpheus-sdk`](https://github.com/BrainCoTech/morpheus-sdk) — Morpheus/Melody sleep devices
+`bc-ble-core` owns the adapter and scan flow, connection and notification
+lifecycle, and per-device GATT writes. The `btleplug` dependency implements
+the platform BLE backends.
+
+Downstream SDKs such as [NexLoop](https://github.com/BrainCoTech/bc-band-sdk),
+[Honda](https://github.com/BrainCoTech/honda-sdk), and
+[Morpheus](https://github.com/BrainCoTech/morpheus-sdk) consume the shared crate
+for their Rust BLE paths. Each SDK owns its device UUIDs, protocol, public APIs,
+and language bindings. An application that handles BLE itself can use its SDK's
+application-managed transport where the SDK provides one.
 
 ## Architecture
 
@@ -17,21 +23,26 @@ bc-ble-core/src/
 ├── runtime.rs    # Tokio runtime helpers (block_on_any, spawn_any)
 ├── constants.rs  # Standard BLE UUIDs (battery, device info)
 ├── callbacks.rs  # Callback storage and dispatch (Rust-side)
-├── adapter.rs    # Central adapter init + event listener (Windows UUID filter)
-├── scan.rs       # Scan start/stop with Windows software UUID filter
-├── connect.rs    # Connect/disconnect, MTU, service discovery, notifications
-├── write.rs      # BLE write with MTU chunking
+├── adapter.rs    # Central adapter initialization and event listener
+├── scan.rs       # Scan lifecycle, cached discovery, and service UUID filtering
+├── connect.rs    # Connection and subscription lifecycle
+├── notifications.rs # Receive queue and callback worker
+├── write.rs      # Per-device frame serialization and MTU-sized writes
 └── c_utils.rs    # C FFI utilities (PeripheralId conversion, UUID parsing)
 ```
 
 ## Usage in downstream SDKs
 
-Add as a git dependency:
+Pin the shared crate to a reviewed Git revision and keep the resolved revision
+in the downstream lockfile.
 
 ```toml
 [dependencies]
-bc-ble-core = { git = "https://github.com/Yongle-Fu/bc-ble-core.git", branch = "main" }
+bc-ble-core = { git = "https://github.com/Yongle-Fu/bc-ble-core.git", rev = "b048a1fcaab5e195c6c0768f66aa27748397084e" }
 ```
+
+If the SDK also declares `btleplug` directly, keep it on the same Git source and
+revision as the shared crate.
 
 Each SDK provides its own service UUIDs and wires up `received_data_callback`:
 
