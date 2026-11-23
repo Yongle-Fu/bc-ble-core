@@ -10,7 +10,7 @@ repository = "https://github.com/Yongle-Fu/bc-ble-core"
 default = []
 
 [dependencies]
-btleplug = { git = "https://github.com/Yongle-Fu/btleplug", rev = "d2e59b23ee7d62a4ba6cb9f7af1724c24d48ec37" }
+btleplug = { git = "https://github.com/Yongle-Fu/btleplug", rev = "3ed87aabc4b37e0a56eb1a95edf7008422794051" }
 uuid = "1"
 futures = "0.3"
 tokio = { version = "1", features = ["full"] }
